@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@theme {
+  --color-rb-charcoal: #2B2622;
+  --color-rb-bg: #E6E4E1;
+  --color-rb-surface: #F5F3F0;
+  --color-rb-secondary: #6E6A65;
+  --color-rb-accent: #8A6F5C;
+
+  --font-sans: var(--font-inter);
+  --font-heading: var(--font-montserrat);
+}
+
+@layer base {
+  html {
+    scroll-smooth: true;
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    @apply bg-rb-bg text-rb-charcoal font-sans;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-heading font-bold;
+  }
+
+  h1 {
+    @apply text-4xl lg:text-5xl;
+  }
+
+  h2 {
+    @apply text-3xl lg:text-4xl;
+  }
+
+  h3 {
+    @apply text-2xl lg:text-3xl;
+  }
+}

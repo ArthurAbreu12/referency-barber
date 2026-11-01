@@ -1,0 +1,278 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT   // Cash payment chosen — awaiting physical payment
+  AWAITING_PAYMENT  // Online payment initiated but not confirmed
+  CONFIRMED         // Payment confirmed (online) or admin-confirmed
+  CANCELLED         // Cancelled by customer or admin
+  COMPLETED         // Service rendered
+  NO_SHOW           // Customer did not appear
+}
+
+enum PaymentMethod {
+  PIX
+  CREDIT_CARD
+  CASH
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REFUNDED
+  CANCELLED
+  IN_PROCESS
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+// ─────────────────────────────────────────────────────────────
+// USER — NextAuth compatible
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified DateTime?
+  phone         String?
+  passwordHash  String?   // null if OAuth only
+  role          Role      @default(CUSTOMER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime? // Soft delete for LGPD
+
+  accounts      Account[]
+  sessions      Session[]
+  bookings      Booking[]
+
+  @@index([email])
+  @@index([deletedAt])
+}
+
+// NextAuth adapter tables
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─────────────────────────────────────────────────────────────
+// SERVICE
+// ─────────────────────────────────────────────────────────────
+
+model Service {
+  id            String    @id @default(cuid())
+  name          String
+  description   String?   @db.Text
+  // Price stored in centavos (integer) — avoids float precision issues
+  // R$ 30.00 = 3000, R$ 35.00 = 3500, R$ 40.00 = 4000
+  priceInCents  Int
+  durationMins  Int       @default(30)  // Used for slot calculation
+  isActive      Boolean   @default(true)
+  displayOrder  Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  bookings      Booking[]
+
+  @@index([isActive, displayOrder])
+}
+
+// ─────────────────────────────────────────────────────────────
+// BARBER
+// ─────────────────────────────────────────────────────────────
+
+model Barber {
+  id          String    @id @default(cuid())
+  name        String
+  bio         String?   @db.Text
+  photoUrl    String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  schedules   Schedule[]
+  bookings    Booking[]
+  blockedSlots BlockedSlot[]
+
+  @@index([isActive])
+}
+
+// ─────────────────────────────────────────────────────────────
+// SCHEDULE — recurring weekly availability per barber
+// ─────────────────────────────────────────────────────────────
+
+model Schedule {
+  id          String     @id @default(cuid())
+  barberId    String
+  dayOfWeek   DayOfWeek
+  startTime   String     // "09:00" — stored as HH:MM string
+  endTime     String     // "18:00"
+  breakStart  String?    // "12:00" — optional lunch break
+  breakEnd    String?    // "13:00"
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  barber      Barber     @relation(fields: [barberId], references: [id], onDelete: Cascade)
+
+  @@unique([barberId, dayOfWeek])
+  @@index([barberId, isActive])
+}
+
+// ─────────────────────────────────────────────────────────────
+// BLOCKED SLOT — one-off exceptions (vacations, events)
+// ─────────────────────────────────────────────────────────────
+
+model BlockedSlot {
+  id          String   @id @default(cuid())
+  barberId    String
+  date        DateTime @db.Date    // The specific date
+  startTime   String?              // null = full day block
+  endTime     String?
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  barber      Barber   @relation(fields: [barberId], references: [id], onDelete: Cascade)
+
+  @@index([barberId, date])
+}
+
+// ─────────────────────────────────────────────────────────────
+// BOOKING
+// ─────────────────────────────────────────────────────────────
+
+model Booking {
+  id              String        @id @default(cuid())
+  userId          String?       // null if guest checkout
+  barberId        String
+  serviceId       String
+  // Snapshot price at booking time — immutable after creation
+  priceAtBooking  Int           // centavos
+
+  // Appointment time
+  appointmentDate DateTime      @db.Date
+  appointmentTime String        // "14:00" HH:MM
+
+  status          BookingStatus @default(AWAITING_PAYMENT)
+  paymentMethod   PaymentMethod
+
+  // Customer info (stored for guests + LGPD-aware retrieval)
+  customerName    String
+  customerEmail   String
+  customerPhone   String
+
+  notes           String?       @db.Text
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  confirmedAt     DateTime?
+  cancelledAt     DateTime?
+
+  user            User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  barber          Barber        @relation(fields: [barberId], references: [id])
+  service         Service       @relation(fields: [serviceId], references: [id])
+  payment         Payment?
+
+  // Prevent double-booking: same barber cannot have two bookings at the same
+  // date+time unless one is cancelled/no-show
+  @@unique([barberId, appointmentDate, appointmentTime], name: "unique_slot")
+  @@index([userId])
+  @@index([barberId, appointmentDate])
+  @@index([status])
+  @@index([customerEmail])
+}
+
+// ─────────────────────────────────────────────────────────────
+// PAYMENT — one-to-one with Booking
+// ─────────────────────────────────────────────────────────────
+
+model Payment {
+  id                String        @id @default(cuid())
+  bookingId         String        @unique
+
+  method            PaymentMethod
+  status            PaymentStatus @default(PENDING)
+  amountInCents     Int
+
+  // Mercado Pago identifiers
+  mpPaymentId       String?       @unique   // MP payment ID from webhook
+  mpPreferenceId    String?                 // MP preference/order ID
+  mpExternalRef     String        @unique   // Our idempotency key (cuid)
+
+  // Pix specific
+  pixQrCode         String?       @db.Text  // Base64 image
+  pixQrCodeText     String?       @db.Text  // Copy-paste key
+  pixExpiresAt      DateTime?
+
+  // Credit card (NO raw card data ever stored)
+  cardLastFour      String?       // From MP response only
+  cardBrand         String?       // "visa", "mastercard" etc.
+
+  webhookPayload    Json?         // Raw MP webhook for audit
+
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking           Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([mpPaymentId])
+  @@index([mpExternalRef])
+  @@index([status])
+}
